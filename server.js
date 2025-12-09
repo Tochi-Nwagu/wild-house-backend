@@ -1,90 +1,85 @@
-import { WebSocketServer, WebSocket } from 'ws';
-import { createServer } from 'http';
+//bring in all required packages previously installed from package.json
+const { WebSocketServer } = require('ws');
+const express = require('express');
+const http = require('http');
+const cors = require('cors');
+require('dotenv').config();
 
-const server = createServer();
+const PORT = process.env.PORT || 5000;
+
+const app = express();
+
+//setting up CORS for frontend communication
+app.use(cors({ orign: true, credentials: true }));
+app.use(express.json());
+
+//login/signup routes
+app.post('/login', (req, res) => {
+  const { username } = req.body;
+  // when we have a DB in the future
+  if (!username) {
+    return res.status(400).json({ err: 'username is required' });
+  } else {
+    res.status(200).json({ success: true, username });
+  }
+});
+
+// websocket setup
+const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
+// store rooms details
 const rooms = {};
 
+//Web socket connection
 wss.on('connection', (ws) => {
-  console.log('New WebSocket connection');
-
   ws.on('message', (data) => {
     const msg = JSON.parse(data);
-    const { type, partyCode, username, payload } = msg;
+    const { type, roomLink, payload, username } = msg;
 
     switch (type) {
-      // User joins a room
       case 'JOIN_ROOM':
-        ws.username = username; // store name
-        ws.partyCode = partyCode; // store room joined
-
-        if (!rooms[partyCode]) rooms[partyCode] = [];
-
-        rooms[partyCode].push(ws);
-
-        console.log(`${username} joined ${partyCode}`);
-
-        // notify everyone except the new user
-        rooms[partyCode].forEach((client) => {
-          if (client !== ws && client.readyState === WebSocket.OPEN) {
-            client.send(
-              JSON.stringify({
-                type: 'USER_JOINED',
-                username,
-              })
-            );
-          }
-        });
+        // If room does not exist yet, create the room
+        if (!rooms[roomLink]) rooms[roomLink] = [];
+        rooms[roomLink].push({ ws, username });
+        //Notify all user in room
+        broadcast(roomLink, { type: 'USER_JOINED', username });
         break;
 
-      // Chat or sync message
+      //Send messages
       case 'SEND_MESSAGE':
-        rooms[partyCode]?.forEach((client) => {
-          if (client.readyState === WebSocket.OPEN) {
-            client.send(
-              JSON.stringify({
-                type: 'NEW_MESSAGE',
-                payload,
-                username,
-              })
-            );
-          }
-        });
+        broadcast(roomLink, { type: 'NEW_MESSAGE', username, payload });
         break;
 
-      default:
-        console.log('Unknown type:', type);
+      // video controls
+      case 'VIDEO_CONTROL':
+        broadcast(roomLink, { type: 'VIDEO_CONTROL', payload, username }, ws);
+        break;
     }
   });
 
-  // User disconnects
   ws.on('close', () => {
-    const partyCode = ws.partyCode;
-    const username = ws.username;
+    //remove from ll rooms
+    for (const roomLink in rooms) {
+      rooms[roomLink] = rooms[roomLink].filter((user) => user.ws !== ws);
 
-    if (!partyCode || !rooms[partyCode]) return;
-
-    rooms[partyCode] = rooms[partyCode].filter((client) => client !== ws);
-
-    console.log(`${username} left ${partyCode}`);
-
-    // Notify remaining users
-    rooms[partyCode].forEach((client) => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(
-          JSON.stringify({
-            type: 'USER_LEFT',
-            username,
-          })
-        );
-      }
-    });
-
-    if (rooms[partyCode].length === 0) delete rooms[partyCode];
+      // notify other users
+      rooms[roomLink].forEach((user) =>
+        user.ws.send(JSON.stringify({ type: 'USER_LEFT', username: 'A user' }))
+      );
+      if (rooms[roomLink].length === 0) delete rooms[roomLink];
+    }
   });
 });
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+
+// exclude the user who left
+function broadcast(roomLink, message, excludeWs) {
+  if (!rooms[roomLink]) return;
+
+  rooms[roomLink].forEach((user) => {
+    if (user.ws !== excludeWs && user.ws.readyState === 1)
+      user.ws.send(JSON.stringify(message));
+  });
+}
+
+server.listen(PORT, () => console.log(`Server running on ${PORT}`));
